@@ -27,6 +27,14 @@ from google.cloud.sqlcommenter.opentelemetry import get_opentelemetry_values
 django_version = django.get_version()
 logger = logging.getLogger(__name__)
 
+# Import Celery's current_task to access the current Celery task context
+try:
+    from celery import current_task
+except ImportError:
+    logger.info("celery not installed")
+    print("celery not installed")
+    current_task = None  # Celery is not installed or not used
+
 
 class SqlCommenter:
     """
@@ -65,21 +73,42 @@ class QueryWrapper:
         db_driver = context['connection'].settings_dict.get('ENGINE', '')
         resolver_match = self.request.resolver_match
 
+        # Initialize a dictionary to hold additional comment parameters
+        additional_comments = {}
+
+        # Attempt to retrieve the Celery task name if running within a Celery task
+        if current_task:
+            logger.info("celery task detected: %s", current_task)
+            print("celery task detected: " + current_task)
+            try:
+                task = current_task
+                # Check if the task is active and has a name attribute
+                if task and hasattr(task, 'name'):
+                    additional_comments['celery_task'] = task.name
+            except Exception as e:
+                logger.debug(f"Unable to retrieve Celery task name: {e}")
+        else:
+            logger.info("celery task not detected!")
+            print("celery task not detected!")
+
         sql = add_sql_comment(
             sql,
             # Information about the controller.
             controller=resolver_match.view_name if resolver_match and with_controller else None,
-            # route is the pattern that matched a request with a controller i.e. the regex
+            # Route is the pattern that matched a request with a controller i.e., the regex
             # See https://docs.djangoproject.com/en/stable/ref/urlresolvers/#django.urls.ResolverMatch.route
             # getattr() because the attribute doesn't exist in Django < 2.2.
             route=getattr(resolver_match, 'route', None) if resolver_match and with_route else None,
             # app_name is the application namespace for the URL pattern that matches the URL.
             # See https://docs.djangoproject.com/en/stable/ref/urlresolvers/#django.urls.ResolverMatch.app_name
             app_name=(resolver_match.app_name or None) if resolver_match and with_app_name else None,
-            # Framework centric information.
+            # Framework-centric information.
             framework=('django:%s' % django_version) if with_framework else None,
             # Information about the database and driver.
             db_driver=db_driver if with_db_driver else None,
+            # Include Celery task name if available
+            **additional_comments,
+            # OpenCensus and OpenTelemetry values
             **get_opencensus_values() if with_opencensus else {},
             **get_opentelemetry_values() if with_opentelemetry else {}
         )
@@ -91,7 +120,7 @@ class QueryWrapper:
         #  * https://github.com/basecamp/marginalia/pull/80
 
         # Add the query to the query log if debugging.
-        if isinstance(context['cursor'], CursorDebugWrapper):
-            context['connection'].queries_log.append(sql)
+        # if isinstance(context['cursor'], CursorDebugWrapper):
+        #     context['connection'].queries_log.append(sql)
 
         return execute(sql, params, many, context)
